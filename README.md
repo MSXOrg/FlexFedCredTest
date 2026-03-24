@@ -44,14 +44,16 @@ FlexFedCredTest/
 
 A PowerShell 7 script that performs the complete end-to-end setup:
 
-1. **Creates an Azure Resource Group** (default: `rg-msxorg-github`).
-2. **Creates a User-Assigned Managed Identity** (default: `mi-msxorg-github`).
-3. **Configures a Flexible Federated Identity Credential** on the managed identity with the expression:
+1. **Creates an Azure AD App Registration** (default display name: `app-msxorg-github`).
+2. **Ensures a Service Principal** exists for the App Registration in the tenant.
+3. **Configures a Flexible Federated Identity Credential** on the App Registration via the Microsoft Graph API with the expression:
    ```
    claims['sub'] matches 'repo:MSXOrg/*'
    ```
    This single credential trusts any GitHub Actions workflow running from any repository in the **MSXOrg** organization.
 4. **Stores the required Azure secrets** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) as organization-level GitHub secrets so every repository in the org can consume them.
+
+> **Important:** Flexible federated identity credentials are only supported on **application objects (App Registrations)**, not on User-Assigned Managed Identities. See the [Microsoft Entra documentation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-flexible-federated-identity-credentials?tabs=github) for details.
 
 ### `.github/workflows/azure-login.yml`
 
@@ -63,7 +65,8 @@ A GitHub Actions workflow that validates the setup by logging in to Azure using 
 
 - **Azure**
   - An active Azure subscription.
-  - The `Az` PowerShell module installed and authenticated (`Connect-AzAccount`).
+  - The `Az.Accounts` and `Az.Resources` PowerShell modules installed and authenticated (`Connect-AzAccount`).
+  - The authenticated identity must have permission to create App Registrations and Service Principals (e.g., **Application Administrator** role in the tenant).
 - **GitHub**
   - The `GitHub` PowerShell module installed (`Install-Module -Name GitHub`).
   - Authenticated to GitHub with permissions to manage organization secrets (`Connect-GitHub`).
@@ -91,16 +94,14 @@ Connect-GitHub
 
 | Parameter | Default | Description |
 |---|---|---|
-| `-ResourceGroupName` | `rg-msxorg-github` | Name of the Azure Resource Group to create |
-| `-Location` | `swedencentral` | Azure region for all resources |
-| `-ManagedIdentityName` | `mi-msxorg-github` | Name of the User-Assigned Managed Identity |
+| `-AppRegistrationName` | `app-msxorg-github` | Display name of the Azure AD App Registration to create |
 | `-FederatedCredentialName` | `github-msxorg-all-repos` | Name of the federated identity credential |
 | `-GitHubOrganization` | `MSXOrg` | GitHub organization whose workflows should be trusted |
 
 Example with custom values:
 
 ```powershell
-./scripts/Setup-FlexFedCred.ps1 -ResourceGroupName 'rg-custom' -Location 'westeurope'
+./scripts/Setup-FlexFedCred.ps1 -AppRegistrationName 'app-custom' -GitHubOrganization 'MyOrg'
 ```
 
 ---
@@ -125,17 +126,17 @@ steps:
 
 > **Note:** The `id-token: write` permission is mandatory for OIDC-based login. Without it, GitHub will not issue an OIDC token to the workflow.
 
-After a successful login, subsequent steps can use the Azure CLI, Azure PowerShell, or any Azure SDK directly—all backed by the managed identity's permissions.
+After a successful login, subsequent steps can use the Azure CLI, Azure PowerShell, or any Azure SDK directly—all backed by the service principal's permissions.
 
 ---
 
 ## Assigning Azure Permissions
 
-The managed identity is created with no role assignments by default. After running the setup script, grant it the roles it needs:
+The service principal is created with no role assignments by default. After running the setup script, grant it the roles it needs:
 
 ```powershell
 New-AzRoleAssignment `
-    -ObjectId    "<PrincipalId from setup output>" `
+    -ObjectId    "<ServicePrincipalObjectId from setup output>" `
     -RoleDefinitionName Contributor `
     -Scope "/subscriptions/<SubscriptionId>"
 ```
