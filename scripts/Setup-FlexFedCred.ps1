@@ -1,7 +1,7 @@
 ﻿#Requires -Version 7.4
-#Requires -Modules @{ ModuleName = 'Az.Accounts'; ModuleVersion = '2.12.0' }
-#Requires -Modules @{ ModuleName = 'Az.Resources'; ModuleVersion = '6.0.0' }
-#Requires -Modules @{ ModuleName = 'GitHub'; ModuleVersion = '0.1.0' }
+#Requires -Modules @{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.3.3' }
+#Requires -Modules @{ ModuleName = 'Az.Resources'; ModuleVersion = '9.0.3' }
+#Requires -Modules @{ ModuleName = 'GitHub'; ModuleVersion = '0.42.0' }
 
 <#
     .SYNOPSIS
