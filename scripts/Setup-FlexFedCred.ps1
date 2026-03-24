@@ -3,16 +3,20 @@
 
 <#
     .SYNOPSIS
-    Sets up an Azure User-Assigned Managed Identity with a flexible federated credential for GitHub Actions.
+    Sets up an Azure App Registration with a flexible federated credential for GitHub Actions.
 
     .DESCRIPTION
     This script performs the following end-to-end setup:
-    1. Creates a new Azure Resource Group.
-    2. Creates a User-Assigned Managed Identity (UAMI) in the resource group.
-    3. Configures a flexible federated identity credential on the UAMI that trusts all
+    1. Creates an Azure AD App Registration (application object).
+    2. Ensures a Service Principal exists for the App Registration.
+    3. Configures a flexible federated identity credential on the App Registration that trusts all
        GitHub Actions runs from any repository in the specified GitHub organization.
     4. Uses the GitHub PowerShell module to store the AZURE_CLIENT_ID, AZURE_TENANT_ID,
        and AZURE_SUBSCRIPTION_ID as organization-level secrets on the specified GitHub organization.
+
+    Flexible federated identity credentials are only supported on application objects (App Registrations),
+    not on workload identities such as User-Assigned Managed Identities. See:
+    https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-flexible-federated-identity-credentials
 
     .EXAMPLE
     ```powershell
@@ -23,14 +27,16 @@
 
     .EXAMPLE
     ```powershell
-    ./scripts/Setup-FlexFedCred.ps1 -ResourceGroupName 'rg-custom' -Location 'westeurope'
+    ./scripts/Setup-FlexFedCred.ps1 -AppRegistrationName 'app-custom' -GitHubOrganization 'MyOrg'
     ```
 
-    Runs the setup with a custom resource group name and location.
+    Runs the setup with a custom app registration name and GitHub organization.
 
     .NOTES
     Prerequisites:
     - Az PowerShell module installed and authenticated (`Connect-AzAccount`).
+      The authenticated identity must have permission to create App Registrations and
+      Service Principals in the Azure AD tenant (e.g., Application Administrator role).
     - The GitHub PowerShell module installed (`Install-Module -Name GitHub`).
     - Authenticated to GitHub with permissions to manage organization secrets (`Connect-GitHub`).
 #>
@@ -40,17 +46,9 @@
 )]
 [CmdletBinding()]
 param(
-    # The name of the resource group to create.
+    # The display name of the App Registration to create.
     [Parameter()]
-    [string] $ResourceGroupName = 'rg-msxorg-github',
-
-    # The Azure region for the resource group and managed identity.
-    [Parameter()]
-    [string] $Location = 'swedencentral',
-
-    # The name of the user-assigned managed identity.
-    [Parameter()]
-    [string] $ManagedIdentityName = 'mi-msxorg-github',
+    [string] $AppRegistrationName = 'app-msxorg-github',
 
     # The name of the federated identity credential.
     [Parameter()]
@@ -63,6 +61,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $InformationPreference = 'Continue'
+
+# Validate parameter formats up-front
+if ($AppRegistrationName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-_.]{0,118}$') {
+    throw "Invalid AppRegistrationName '$AppRegistrationName'. Use only letters, digits, hyphens, underscores, and periods (max 120 chars)."
+}
+if ($FederatedCredentialName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-_]{0,118}$') {
+    throw "Invalid FederatedCredentialName '$FederatedCredentialName'. Use only letters, digits, and hyphens/underscores (max 120 chars)."
+}
+if ($GitHubOrganization -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-]{0,37}$') {
+    throw "Invalid GitHubOrganization '$GitHubOrganization'. GitHub organization names may only contain alphanumeric characters and hyphens."
+}
 
 #region Validate prerequisites
 Write-Information '--- Validating prerequisites ---'
@@ -85,82 +94,85 @@ if (-not $ghContext) {
 Write-Information "  GitHub context: $($ghContext.Name)"
 #endregion
 
-#region Step 1 - Create Resource Group
+#region Step 1 - Create App Registration
 Write-Information ''
-Write-Information '--- Step 1: Create Resource Group ---'
+Write-Information '--- Step 1: Create App Registration ---'
 
-$existingRg = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue
-if ($existingRg) {
-    Write-Information "  Resource group '$ResourceGroupName' already exists, skipping creation."
+$app = Get-AzADApplication -DisplayName $AppRegistrationName -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($app) {
+    Write-Information "  App registration '$AppRegistrationName' already exists, skipping creation."
 } else {
-    Write-Information "  Creating resource group '$ResourceGroupName' in '$Location'..."
-    $null = New-AzResourceGroup -Name $ResourceGroupName -Location $Location
-    Write-Information "  Resource group '$ResourceGroupName' created."
+    Write-Information "  Creating app registration '$AppRegistrationName'..."
+    $app = New-AzADApplication -DisplayName $AppRegistrationName
+    Write-Information "  App registration '$AppRegistrationName' created."
 }
+
+$clientId = $app.AppId
+$appObjectId = $app.Id
+Write-Information "  Client ID (AppId): $clientId"
+Write-Information "  Object ID:         $appObjectId"
 #endregion
 
-#region Step 2 - Create User-Assigned Managed Identity
+#region Step 2 - Ensure Service Principal exists
 Write-Information ''
-Write-Information '--- Step 2: Create User-Assigned Managed Identity ---'
+Write-Information '--- Step 2: Ensure Service Principal ---'
 
-$mi = Get-AzUserAssignedIdentity -Name $ManagedIdentityName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-if ($mi) {
-    Write-Information "  Managed identity '$ManagedIdentityName' already exists, skipping creation."
+$sp = Get-AzADServicePrincipal -ApplicationId $clientId -ErrorAction SilentlyContinue
+if ($sp) {
+    Write-Information "  Service principal for '$AppRegistrationName' already exists, skipping creation."
 } else {
-    Write-Information "  Creating managed identity '$ManagedIdentityName'..."
-    $miParams = @{
-        Name              = $ManagedIdentityName
-        ResourceGroupName = $ResourceGroupName
-        Location          = $Location
-    }
-    $mi = New-AzUserAssignedIdentity @miParams
-    Write-Information "  Managed identity '$ManagedIdentityName' created."
+    Write-Information "  Creating service principal for '$AppRegistrationName'..."
+    $sp = New-AzADServicePrincipal -ApplicationId $clientId
+    Write-Information "  Service principal created."
 }
 
-$clientId = $mi.ClientId
-$principalId = $mi.PrincipalId
-$miResourceId = $mi.Id
-Write-Information "  Client ID:    $clientId"
-Write-Information "  Principal ID: $principalId"
+Write-Information "  Service Principal Object ID: $($sp.Id)"
 #endregion
 
 #region Step 3 - Create Flexible Federated Identity Credential
 Write-Information ''
 Write-Information '--- Step 3: Create Flexible Federated Identity Credential ---'
 
-# New-AzFederatedIdentityCredential does not support flexible FICs (claimsMatchingExpression).
-# We must use Invoke-AzRestMethod with the preview ARM API.
-$ficPath = "$miResourceId/federatedIdentityCredentials/$($FederatedCredentialName)?api-version=2025-01-31-preview"
+# Flexible FICs must be created on application objects via the Microsoft Graph API.
+# New-AzADAppFederatedCredential does not support the claimsMatchingExpression property,
+# so we use Invoke-AzRestMethod targeting the Microsoft Graph beta endpoint.
+$graphFicBaseUri = "https://graph.microsoft.com/beta/applications/$appObjectId/federatedIdentityCredentials"
 
-$ficBody = @{
-    properties = @{
+# Check if a credential with this name already exists
+$existingFicResponse = Invoke-AzRestMethod -Uri "$graphFicBaseUri?`$filter=name eq '$FederatedCredentialName'" -Method GET
+$existingFics = ($existingFicResponse.Content | ConvertFrom-Json).value
+
+if ($existingFics -and $existingFics.Count -gt 0) {
+    Write-Information "  Flexible federated credential '$FederatedCredentialName' already exists, skipping creation."
+    $fic = $existingFics[0]
+    $ficId = $fic.id
+} else {
+    $ficBody = @{
+        name                     = $FederatedCredentialName
         issuer                   = 'https://token.actions.githubusercontent.com'
         audiences                = @('api://AzureADTokenExchange')
         claimsMatchingExpression = @{
             value           = "claims['sub'] matches 'repo:$GitHubOrganization/*'"
             languageVersion = 1
         }
+    } | ConvertTo-Json -Depth 5 -Compress
+
+    Write-Information "  Expression: claims['sub'] matches 'repo:$GitHubOrganization/*'"
+    Write-Information "  Creating flexible federated credential '$FederatedCredentialName'..."
+
+    $ficResponse = Invoke-AzRestMethod -Uri $graphFicBaseUri -Method POST -Payload $ficBody
+
+    if ($ficResponse.StatusCode -notin 200, 201) {
+        throw "Failed to create flexible federated identity credential: $($ficResponse.Content)"
     }
-} | ConvertTo-Json -Depth 5 -Compress
 
-Write-Information "  Expression: claims['sub'] matches 'repo:$GitHubOrganization/*'"
-Write-Information "  Creating flexible federated credential '$FederatedCredentialName'..."
-
-$ficRestParams = @{
-    Path    = $ficPath
-    Method  = 'PUT'
-    Payload = $ficBody
-}
-$ficResponse = Invoke-AzRestMethod @ficRestParams
-
-if ($ficResponse.StatusCode -notin 200, 201) {
-    throw "Failed to create flexible federated identity credential: $($ficResponse.Content)"
+    $fic = $ficResponse.Content | ConvertFrom-Json
+    Write-Information "  Federated credential '$($fic.name)' created successfully."
+    $ficId = $fic.id
 }
 
-$fic = $ficResponse.Content | ConvertFrom-Json
-Write-Information "  Federated credential '$($fic.name)' created successfully."
-Write-Information "  Issuer:     $($fic.properties.issuer)"
-Write-Information "  Expression: $($fic.properties.claimsMatchingExpression.value)"
+Write-Information "  Issuer:     $($fic.issuer)"
+Write-Information "  Expression: $($fic.claimsMatchingExpression.value)"
 #endregion
 
 #region Step 4 - Store secrets on GitHub organization
@@ -191,24 +203,27 @@ Write-Information '  Organization secrets configured.'
 Write-Information ''
 Write-Information '=== Setup Complete ==='
 
-# Fetch the final state of the managed identity
+# Fetch the final state of the app registration
 Write-Information ''
-Write-Information '--- Managed Identity ---'
-$finalMi = Get-AzUserAssignedIdentity -Name $ManagedIdentityName -ResourceGroupName $ResourceGroupName
-$finalMi | Format-List Name, ResourceGroupName, Location, ClientId, PrincipalId, TenantId, Id | Out-String | ForEach-Object { Write-Information $_.TrimEnd() }
+Write-Information '--- App Registration ---'
+$finalApp = Get-AzADApplication -ApplicationId $clientId
+[PSCustomObject]@{
+    DisplayName = $finalApp.DisplayName
+    AppId       = $finalApp.AppId
+    ObjectId    = $finalApp.Id
+} | Format-List | Out-String | ForEach-Object { Write-Information $_.TrimEnd() }
 
 # Fetch the final state of the flexible federated identity credential
 Write-Information '--- Flexible Federated Identity Credential ---'
-$ficGetPath = "$($finalMi.Id)/federatedIdentityCredentials/$($FederatedCredentialName)?api-version=2025-01-31-preview"
-$ficGetResponse = Invoke-AzRestMethod -Path $ficGetPath -Method GET
+$ficGetResponse = Invoke-AzRestMethod -Uri "$graphFicBaseUri/$ficId" -Method GET
 if ($ficGetResponse.StatusCode -eq 200) {
     $finalFic = $ficGetResponse.Content | ConvertFrom-Json
     [PSCustomObject]@{
         Name       = $finalFic.name
-        Issuer     = $finalFic.properties.issuer
-        Audiences  = $finalFic.properties.audiences -join ', '
-        Expression = $finalFic.properties.claimsMatchingExpression.value
-        Language   = $finalFic.properties.claimsMatchingExpression.languageVersion
+        Issuer     = $finalFic.issuer
+        Audiences  = $finalFic.audiences -join ', '
+        Expression = $finalFic.claimsMatchingExpression.value
+        Language   = $finalFic.claimsMatchingExpression.languageVersion
     } | Format-List | Out-String | ForEach-Object { Write-Information $_.TrimEnd() }
 } else {
     Write-Warning "Could not retrieve federated credential: $($ficGetResponse.Content)"
@@ -219,8 +234,8 @@ Write-Information "Organization:  $GitHubOrganization"
 Write-Information 'Secrets set:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID'
 Write-Information ''
 Write-Information 'Next steps:'
-Write-Information '  1. Assign RBAC roles to the managed identity principal on the Azure resources you need.'
-Write-Information "     Example: New-AzRoleAssignment -ObjectId $($finalMi.PrincipalId) -RoleDefinitionName Contributor -Scope /subscriptions/$subscriptionId"
+Write-Information '  1. Assign RBAC roles to the service principal on the Azure resources you need.'
+Write-Information "     Example: New-AzRoleAssignment -ObjectId $($sp.Id) -RoleDefinitionName Contributor -Scope /subscriptions/$subscriptionId"
 Write-Information '  2. Use azure/login@v2 in your GitHub Actions workflows with:'
 Write-Information '       client-id:       ${{ secrets.AZURE_CLIENT_ID }}'
 Write-Information '       tenant-id:       ${{ secrets.AZURE_TENANT_ID }}'
