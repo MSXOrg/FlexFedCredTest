@@ -1,5 +1,7 @@
 ﻿#Requires -Version 7.4
-#Requires -Modules Az, GitHub
+#Requires -Modules @{ ModuleName = 'Az.Accounts'; ModuleVersion = '2.12.0' }
+#Requires -Modules @{ ModuleName = 'Az.Resources'; ModuleVersion = '6.0.0' }
+#Requires -Modules @{ ModuleName = 'GitHub'; ModuleVersion = '0.1.0' }
 
 <#
     .SYNOPSIS
@@ -34,7 +36,7 @@
 
     .NOTES
     Prerequisites:
-    - Az PowerShell module installed and authenticated (`Connect-AzAccount`).
+    - Az.Accounts and Az.Resources PowerShell modules installed and authenticated (`Connect-AzAccount`).
       The authenticated identity must have permission to create App Registrations and
       Service Principals in the Azure AD tenant (e.g., Application Administrator role).
     - The GitHub PowerShell module installed (`Install-Module -Name GitHub`).
@@ -61,17 +63,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $InformationPreference = 'Continue'
-
-# Validate parameter formats up-front
-if ($AppRegistrationName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-_.]{0,118}$') {
-    throw "Invalid AppRegistrationName '$AppRegistrationName'. Use only letters, digits, hyphens, underscores, and periods (max 120 chars)."
-}
-if ($FederatedCredentialName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-_]{0,118}$') {
-    throw "Invalid FederatedCredentialName '$FederatedCredentialName'. Use only letters, digits, and hyphens/underscores (max 120 chars)."
-}
-if ($GitHubOrganization -notmatch '^[a-zA-Z0-9][a-zA-Z0-9\-]{0,37}$') {
-    throw "Invalid GitHubOrganization '$GitHubOrganization'. GitHub organization names may only contain alphanumeric characters and hyphens."
-}
 
 #region Validate prerequisites
 Write-Information '--- Validating prerequisites ---'
